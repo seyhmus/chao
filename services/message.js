@@ -4,7 +4,6 @@ import { compressImage } from "@/lib/imageUtil";
 import { slice } from "@/lib/fileUtil";
 import { nanoid } from "nanoid";
 import api from "@/lib/api";
-// import { uploadToR2, pushEvent } from "@/lib/actions";
 
 export class MessageService {
   constructor(metadata) {

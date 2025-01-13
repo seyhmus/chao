@@ -22,6 +22,7 @@ import {
   importKey,
   decrypt,
   deriveSharedSecret,
+  decryptFile,
 } from "@/lib/crypto";
 import RequestNotifications from "@/components/Requests";
 import api from "@/lib/api";
@@ -239,34 +240,36 @@ export const MessagingProvider = ({ children }) => {
         : message.senderName;
 
     if (message.isEncrypted) {
-      // const dbFriend = await db.friends.get(message.peerId);
-      // console.log("friend from db:", dbFriend);
-      // const encryptionKey = await importKey(sharedSecret, "secret");
       const encryptionKey = await getEncryptionKey(message.peerId);
-      message.content = await decrypt(message.content, encryptionKey);
+
+      const downloadNeeded = message.url && !message.blob?.size;
+      if (downloadNeeded) {
+        return db.conversations.add(message).then((id) => {
+          fetch(message.url)
+            .then((response) => response.blob())
+            .then(async (blob) => {
+              const decryptedBlob = await decryptFile(blob, encryptionKey);
+              const file = new File([decryptedBlob], message.fileName, {
+                type: message.fileType,
+              });
+              // todo: verify hash
+              message.blob = file;
+              delete message.url;
+              db.conversations.update(id, message);
+            })
+            .catch((error) => {
+              console.error("Failed to fetch and update blob:", error);
+              return db.conversations.add({ ...message, fetchFailed: true });
+            });
+
+          return id;
+        });
+      } else {
+        message.content = await decrypt(message.content, encryptionKey);
+      }
     }
 
-    const downloadNeeded = message.url && !message.blob?.size;
-    if (downloadNeeded) {
-      return db.conversations.add(message).then((id) => {
-        fetch(message.url)
-          .then((response) => response.blob())
-          .then((blob) => {
-            const file = new File([blob], message.fileName, {
-              type: message.fileType,
-            });
-            message.blob = file;
-            delete message.url;
-            db.conversations.update(id, message);
-          })
-          .catch((error) => {
-            console.error("Failed to fetch and update blob:", error);
-            return db.conversations.add({ ...message, fetchFailed: true });
-          });
-
-        return id;
-      });
-    } else return db.conversations.add(message);
+    return db.conversations.add(message);
   };
 
   // Delete message

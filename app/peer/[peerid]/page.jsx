@@ -7,7 +7,8 @@ import useMessagingContext from "@/context/MessageContext";
 import { Flex, ScrollArea, Text } from "@radix-ui/themes";
 import { useParams } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
-import { encrypt } from "@/lib/crypto";
+import { encrypt, encryptFile } from "@/lib/crypto";
+import { hashKey } from "@/lib/fileUtil";
 
 const PrivateChat = () => {
   const { peerid } = useParams();
@@ -57,9 +58,6 @@ const PrivateChat = () => {
     const plainMessage = event.target.value.trim();
     if (!plainMessage) return;
 
-    // const sharedSecret = friends.get(peerid).sharedSecret;
-    // console.log("shared secret used for encryption", sharedSecret);
-    // const encryptionKey = await importKey(sharedSecret, "secret");
     const encryptionKey = await getEncryptionKey(peerid);
 
     const content = await encrypt(plainMessage, encryptionKey);
@@ -79,6 +77,7 @@ const PrivateChat = () => {
     setIsTyping(false);
   };
 
+  // file upload - unencrypted
   const handleSendFile = async (event) => {
     const file = event.target.files[0];
     if (!file) return;
@@ -107,6 +106,54 @@ const PrivateChat = () => {
     } catch (error) {
       deleteConversation(fileMetadata);
       console.error(error);
+    }
+  };
+
+  // file upload - encrypted
+  // todo: add compression
+  // todo: add status
+  const handleSendEncryptedFile = async (event) => {
+    const file = event.target.files[0];
+    if (!file) return;
+
+    const hash = await hashKey(file);
+
+    const fileMetadata = {
+      senderId: userId,
+      senderName: displayName,
+      receiverId: peerid,
+      timestamp: Date.now(),
+      fileName: file.name,
+      fileType: file.type,
+      fileSize: file.size,
+      hash,
+    };
+
+    try {
+      const messageId = await addConversation({ ...fileMetadata, blob: file });
+
+      const encryptionKey = await getEncryptionKey(peerid);
+
+      const encryptedBlob = await encryptFile(file, encryptionKey);
+      const encryptedFile = new File([encryptedBlob], file.name, {
+        type: encryptedBlob.type,
+      });
+
+      const uploadResponse = await messageService.postFileToR2(encryptedFile);
+
+      await messageService.postEvent({
+        ...fileMetadata,
+        ...uploadResponse,
+        eventType: "message",
+        method: "pusher",
+        isEncrypted: true,
+      });
+
+      markMessageAsPost(messageId);
+    } catch (error) {
+      deleteConversation(fileMetadata);
+      console.error("Failed to upload encrypted file:", error);
+      throw error;
     }
   };
 
@@ -144,7 +191,7 @@ const PrivateChat = () => {
       </ScrollArea>
 
       <MessageInput
-        handleSendFile={handleSendFile}
+        handleSendFile={handleSendEncryptedFile}
         handleSendMessage={handleSendMessage}
         handleGameRequest={messageService.postGameRequest}
         peerId={peerid}
