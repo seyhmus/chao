@@ -78,8 +78,9 @@ export class MessageService {
       return {
         url,
         blob: newFile,
-        fileName: newFile.name,
-        fileType: newFile.type,
+        compressedFileName: newFile.name,
+        compressedFileType: newFile.type,
+        isCompressed: compress,
       };
     }
 

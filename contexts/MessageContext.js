@@ -26,6 +26,7 @@ import {
 } from "@/lib/crypto";
 import RequestNotifications from "@/components/Requests";
 import api from "@/lib/api";
+import { decompress } from "@/lib/fileUtil";
 
 const MessagingContext = createContext();
 
@@ -248,11 +249,16 @@ export const MessagingProvider = ({ children }) => {
           fetch(message.url)
             .then((response) => response.blob())
             .then(async (blob) => {
-              const decryptedBlob = await decryptFile(blob, encryptionKey);
-              const file = new File([decryptedBlob], message.fileName, {
+              if (message.isCompressed) blob = await decompress(blob);
+              blob = await decryptFile(blob, encryptionKey);
+              const file = new File([blob], message.fileName, {
                 type: message.fileType,
               });
               // todo: verify hash
+              // const hash = hashKey(file);
+              // if (hash !== message.hash) {
+              //   throw new Error("Hash mismatch");
+              // }
               message.blob = file;
               delete message.url;
               db.conversations.update(id, message);

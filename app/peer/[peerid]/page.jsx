@@ -77,41 +77,9 @@ const PrivateChat = () => {
     setIsTyping(false);
   };
 
-  // file upload - unencrypted
-  const handleSendFile = async (event) => {
-    const file = event.target.files[0];
-    if (!file) return;
-
-    const fileMetadata = {
-      senderId: userId,
-      senderName: displayName,
-      receiverId: peerid,
-      timestamp: Date.now(),
-      fileName: file.name,
-      fileType: file.type,
-    };
-
-    try {
-      const messageId = await addConversation({ ...fileMetadata, blob: file });
-
-      const uploadResponse = await messageService.postFileToR2(file);
-      await messageService.postEvent({
-        ...uploadResponse,
-        ...fileMetadata,
-        eventType: "message",
-        method: "pusher",
-      });
-
-      markMessageAsPost(messageId);
-    } catch (error) {
-      deleteConversation(fileMetadata);
-      console.error(error);
-    }
-  };
-
   // file upload - encrypted
-  // todo: add compression
   // todo: add status
+  // todo: multipart upload
   const handleSendEncryptedFile = async (event) => {
     const file = event.target.files[0];
     if (!file) return;
@@ -139,7 +107,10 @@ const PrivateChat = () => {
         type: encryptedBlob.type,
       });
 
-      const uploadResponse = await messageService.postFileToR2(encryptedFile);
+      const uploadResponse = await messageService.postFileToR2(
+        encryptedFile,
+        true // compress
+      );
 
       await messageService.postEvent({
         ...fileMetadata,
