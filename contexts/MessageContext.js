@@ -1,93 +1,222 @@
 "use client";
 
+import { useRouter } from "next/navigation";
 import {
   createContext,
-  useContext,
-  useState,
-  useEffect,
-  useRef,
   useCallback,
+  useContext,
+  useEffect,
   useMemo,
+  useRef,
+  useState,
 } from "react";
-import { useRouter } from "next/navigation";
 
 import Dexie, { liveQuery } from "dexie";
 
-import { auth } from "@/lib/firebase";
-import { MessageService } from "@/services/message";
-import { getPusherClient, disconnectPusher } from "@/lib/pusher";
-import {
-  generateKeys,
-  exportKey,
-  importKey,
-  decrypt,
-  deriveSharedSecret,
-  decryptFile,
-} from "@/lib/crypto";
 import RequestNotifications from "@/components/Requests";
 import api from "@/lib/api";
-import { decompress } from "@/lib/fileUtil";
+import {
+  decrypt,
+  decryptFile,
+  deriveSharedSecret,
+  exportKey,
+  generateKeyPair,
+  importKey,
+} from "@/lib/crypto";
+import {
+  decompress,
+  combine,
+  base64ToBlob,
+  base64ToArrayBuffer,
+} from "@/lib/fileUtil";
+import { auth } from "@/lib/firebase";
+import { disconnectPusher, getPusherClient } from "@/lib/pusher";
+import { MessageService } from "@/services/message";
+import useWebRTC from "@/hooks/useWebRTC2";
 
 const MessagingContext = createContext();
 
 export const MessagingProvider = ({ children }) => {
   const router = useRouter();
-  const [messageService, setMessagesService] = useState(null);
+  const [messageService, setMessageService] = useState(null);
 
   const [user, setUser] = useState(null);
   const [userId, setUserId] = useState(null);
   const [displayName, setDisplayName] = useState(null);
 
-  const [users, setUsers] = useState({});
+  const [users, setUsers] = useState({}); // lobby users aka presence users
 
-  const [messages, setMessages] = useState([]);
-  const [requests, setRequests] = useState([]);
+  const [chatMessages, setChatMessages] = useState([]); // lobby messages
+  const [requests, setRequests] = useState([]); // requests from other users
 
   const files = useRef(new Map());
   const privateKeys = useRef(new Map());
 
-  // CRYPTOGRAPHY /////////////////////////////////////////////////////////////////////////////
-  const generateKeyPair = async (peerId) => {
-    try {
-      // Generate a new key pair for this friendship
-      const { publicKey, privateKey } = await generateKeys();
-      privateKeys.current.set(peerId, privateKey);
+  // const messageQueue = useRef([]);
+  // const isProcessingQueue = useRef(false);
 
-      return publicKey;
-    } catch (error) {
-      console.error("Failed to generate keys:", error);
-      throw error;
+  // // Process queued messages
+  // const processMessageQueue = useCallback(async () => {
+  //   if (isProcessingQueue.current || !messageService) return;
+
+  //   isProcessingQueue.current = true;
+
+  //   while (messageQueue.current.length > 0) {
+  //     const message = messageQueue.current[0];
+  //     try {
+  //       console.log("processing message", message);
+  //       await messageService.postSignal(message);
+  //       messageQueue.current.shift(); // Remove processed message
+  //     } catch (error) {
+  //       console.error("Failed to process message:", error);
+  //       break; // Stop processing on error
+  //     }
+  //   }
+
+  //   isProcessingQueue.current = false;
+  // }, [messageService]);
+
+  // // Queue message and attempt to process
+  // const queueMessage = useCallback(
+  //   (message) => {
+  //     messageQueue.current.push(message);
+  //     processMessageQueue();
+  //   },
+  //   [processMessageQueue]
+  // );
+
+  const {
+    createOffer,
+    handleOffer,
+    handleAnswer,
+    handleIceCandidate,
+    sendMessage,
+    sendFile,
+  } = useWebRTC({
+    userId,
+    onIceCandidate: useCallback(
+      (peerId, candidate) => {
+        queueMessage({
+          receiverId: peerId,
+          type: "ice-candidate",
+          candidate,
+        });
+      },
+      [messageService]
+    ),
+    onOffer: useCallback(
+      (peerId, offer) => {
+        queueMessage({
+          receiverId: peerId,
+          type: "offer",
+          offer,
+        });
+      },
+      [messageService]
+    ),
+    onAnswer: useCallback(
+      (peerId, answer) => {
+        queueMessage({
+          receiverId: peerId,
+          type: "answer",
+          answer,
+        });
+      },
+      [messageService]
+    ),
+    onMessage: useCallback(
+      (peerId, data) => {
+        let message = JSON.parse(data);
+        const senderName = users[peerId]?.displayName ?? null;
+        message = {
+          ...message,
+          senderId: peerId,
+          senderName,
+        };
+
+        if (message.isSignal) {
+          console.log("received signal", message);
+          addSignal(message);
+        } else if (message.chunk) {
+          addFileChunk(message);
+        } else {
+          console.log("received conversation", message);
+          addConversation(message);
+        }
+      },
+      [users]
+    ),
+    onStateChange: useCallback(
+      (peerId, state) => {
+        if (state === "closed") {
+          console.log("peer connection closed", peerId);
+          queueMessage({
+            receiverId: peerId,
+            type: "close",
+          });
+        }
+      },
+      [messageService]
+    ),
+  });
+
+  const addFileChunk = (data) => {
+    const { senderId, index, totalChunks, hash, chunk, ...rest } = data;
+
+    const key = `${senderId}-${hash}`;
+    const chunks = files.current.get(key) || new Array(totalChunks).fill(null);
+    chunks[index] = base64ToArrayBuffer(chunk);
+    files.current.set(key, chunks);
+
+    if (chunks.every((chunk) => chunk !== null)) {
+      const blob = new Blob(chunks, { type: "application/octet-stream" });
+
+      const message = {
+        ...rest,
+        senderId,
+        blob,
+        hash,
+        totalChunks,
+        receivedTime: Date.now(),
+      };
+
+      console.log("message", message);
+      addConversation(message);
+
+      // chunks completed for file: delete key
+      files.current.delete(key);
     }
   };
 
+  // CRYPTOGRAPHY /////////////////////////////////////////////////////////////////////////////
+
   // direct friendship request, triggers RequestNotifications component
-  const requestFriendshipTo = async (peerId) => {
+  const requestFriendshipTo = async (peerId, peer = null) => {
     if (peerId === userId)
       throw new Error("You cannot add yourself as a friend");
     if (isFriend(peerId)) throw new Error("Already in your friends list");
 
-    const key = await generateKeyPair(peerId);
-    const publicKey = await exportKey(key);
-    await messageService.postFriendRequest(peerId, publicKey);
+    let { publicKey, privateKey } = await generateKeyPair();
+    privateKeys.current.set(peerId, privateKey);
+    const exportedPublicKey = await exportKey(publicKey);
+    await messageService.postFriendRequest(peerId, exportedPublicKey);
 
-    const peer = await getUser(peerId);
+    if (!peer) peer = await getUser(peerId);
     await db.friends.put(peer); // should trigger update to setFriends through live query, race condition?
   };
 
   // called by RequestNotifications component
-  const acceptAndStorePublicKey = async (request) => {
+  const acceptFriendship = async (request) => {
     const peerId = request.senderId;
 
-    const publicKey = await generateKeyPair(peerId);
+    let { publicKey, privateKey } = await generateKeyPair();
+
     const importedPublicKey = await importKey(request.publicKey, "public");
 
-    // Generate shared secret using ECDH
-    const privateKey = privateKeys.current.get(peerId);
     const sharedSecret = await deriveSharedSecret(
       privateKey,
       importedPublicKey
     );
-    privateKeys.current.delete(peerId); // delete as no longer needed
 
     const exportedPublicKey = await exportKey(publicKey);
     await messageService.postFriendAccept(peerId, exportedPublicKey);
@@ -105,7 +234,7 @@ export const MessagingProvider = ({ children }) => {
   };
 
   // the friend has accepted the request, we can update this info with the shared secret
-  const handleAcceptFriendship = async (data) => {
+  const handleAcceptedFriendship = async (data) => {
     const importedPublicKey = await importKey(data.publicKey, "public");
     const privateKey = privateKeys.current.get(data.senderId);
     const sharedSecret = await deriveSharedSecret(
@@ -177,7 +306,7 @@ export const MessagingProvider = ({ children }) => {
       const { uid, displayName, email, photoURL } = userResult;
 
       return {
-        userId: uid,
+        uid,
         displayName,
         email,
         photoURL,
@@ -212,7 +341,7 @@ export const MessagingProvider = ({ children }) => {
   const requestFriendship = async (email) => {
     const friend = await getUserByEmail(email);
     if (friend) {
-      requestFriendshipTo(friend.uid);
+      requestFriendshipTo(friend.uid, friend);
     } else {
       throw new Error("User not found");
     }
@@ -233,6 +362,8 @@ export const MessagingProvider = ({ children }) => {
   }, [conversations]);
 
   const addConversation = async (message) => {
+    console.log("addConversation", message);
+    console.log("message.blob", message.blob);
     message.peerId =
       message.senderId === userId ? message.receiverId : message.senderId;
     message.peerName =
@@ -240,39 +371,50 @@ export const MessagingProvider = ({ children }) => {
         ? users[message.receiverId]?.displayName
         : message.senderName;
 
-    if (message.isEncrypted) {
-      const encryptionKey = await getEncryptionKey(message.peerId);
+    const encryptionKey = await getEncryptionKey(message.peerId);
 
-      const downloadNeeded = message.url && !message.blob?.size;
-      if (downloadNeeded) {
-        return db.conversations.add(message).then((id) => {
-          fetch(message.url)
-            .then((response) => response.blob())
-            .then(async (blob) => {
-              if (message.isCompressed) blob = await decompress(blob);
+    const downloadNeeded = message.url && !message.blob?.size;
+    if (downloadNeeded) {
+      return db.conversations.add(message).then((id) => {
+        fetch(message.url)
+          .then((response) => response.blob())
+          .then(async (blob) => {
+            if (message.isEncrypted)
               blob = await decryptFile(blob, encryptionKey);
-              const file = new File([blob], message.fileName, {
-                type: message.fileType,
-              });
-              // todo: verify hash
-              // const hash = hashKey(file);
-              // if (hash !== message.hash) {
-              //   throw new Error("Hash mismatch");
-              // }
-              message.blob = file;
-              delete message.url;
-              db.conversations.update(id, message);
-            })
-            .catch((error) => {
-              console.error("Failed to fetch and update blob:", error);
-              return db.conversations.add({ ...message, fetchFailed: true });
-            });
 
-          return id;
-        });
-      } else {
-        message.content = await decrypt(message.content, encryptionKey);
-      }
+            if (message.isCompressed) blob = await decompress(blob);
+
+            const file = new File([blob], message.fileName, {
+              type: message.fileType,
+            });
+            // todo: verify hash
+            // const hash = hashKey(file);
+            // if (hash !== message.hash) {
+            //   throw new Error("Hash mismatch");
+            // }
+            message.blob = file;
+            delete message.url;
+            db.conversations.update(id, message);
+          })
+          .catch((error) => {
+            console.error("Failed to fetch and update blob:", error);
+            return db.conversations.add({ ...message, fetchFailed: true });
+          });
+
+        return id;
+      });
+    } else if (message.blob) {
+      if (message.isEncrypted)
+        message.blob = await decryptFile(message.blob, encryptionKey);
+
+      if (message.isCompressed) message.blob = await decompress(message.blob);
+
+      const file = new File([message.blob], message.fileName, {
+        type: message.fileType,
+      });
+      message.blob = file;
+    } else if (message.isEncrypted) {
+      message.content = await decrypt(message.content, encryptionKey);
     }
 
     return db.conversations.add(message);
@@ -294,13 +436,13 @@ export const MessagingProvider = ({ children }) => {
   );
 
   // Mark my messages as read
-  const markMessagesAsRead = (peerId) => {
-    // mark all messages as read in IndexedDB
+  const markConversationsAsRead = (peerId) => {
+    // mark all converastions as read in IndexedDB
     db.conversations.where("peerId").equals(peerId).modify({ isRead: true });
   };
 
   // Marking isSeen as false is equivalent to marking as post
-  const markMessageAsPost = (messageId) => {
+  const markConversationAsPost = (messageId) => {
     // Fixed version:
     try {
       return db.conversations.update(messageId, { isSeen: false });
@@ -330,6 +472,42 @@ export const MessagingProvider = ({ children }) => {
   }, []);
 
   // SIGNALS //////////////////////////////////////////////////////////////////////////////////
+
+  // outbound signal queue
+  const messageQueue = useRef([]);
+  const isProcessingQueue = useRef(false);
+
+  // Process queued messages
+  const processMessageQueue = useCallback(async () => {
+    if (isProcessingQueue.current || !messageService) return;
+
+    isProcessingQueue.current = true;
+
+    while (messageQueue.current.length > 0) {
+      const message = messageQueue.current[0];
+      try {
+        console.log("  >", message.type, message);
+        await messageService.postSignal(message);
+        messageQueue.current.shift(); // Remove processed message
+      } catch (error) {
+        console.error("Failed to process message:", error);
+        break; // Stop processing on error
+      }
+    }
+
+    isProcessingQueue.current = false;
+  }, [messageService]);
+
+  // Queue message and attempt to process
+  const queueMessage = useCallback(
+    (message) => {
+      messageQueue.current.push(message);
+      processMessageQueue();
+    },
+    [processMessageQueue]
+  );
+
+  // inblound signal queue
   const [signals, setSignals] = useState([]);
   const addSignal = (signal) => {
     setSignals((prev) => [...prev, signal]);
@@ -337,7 +515,6 @@ export const MessagingProvider = ({ children }) => {
 
   const [isProcessing, setIsProcessing] = useState(false);
 
-  // listen for partner signals
   useEffect(() => {
     if (isProcessing) return;
     if (!signals?.length) return;
@@ -345,6 +522,7 @@ export const MessagingProvider = ({ children }) => {
     setIsProcessing(true);
 
     const signal = signals[0];
+    console.log("<  ", signal.type, signal);
 
     handleSignal(signal);
 
@@ -356,7 +534,7 @@ export const MessagingProvider = ({ children }) => {
   const [peerIsTyping, setPeerIsTyping] = useState({});
 
   const handleSignal = async (signal) => {
-    const { senderId, type, sdp, candidate } = signal;
+    const { senderId, type, offer, answer, candidate } = signal;
 
     try {
       switch (type) {
@@ -366,6 +544,18 @@ export const MessagingProvider = ({ children }) => {
               ...prev,
               [senderId]: signal.isTyping,
             }));
+          break;
+
+        case "offer":
+          await handleOffer(senderId, offer);
+          break;
+
+        case "answer":
+          await handleAnswer(senderId, answer);
+          break;
+
+        case "ice-candidate":
+          await handleIceCandidate(senderId, candidate);
           break;
 
         default:
@@ -411,10 +601,10 @@ export const MessagingProvider = ({ children }) => {
 
       channel.bind("message", (data) => {
         if (data.to) {
-          if (data.to === userId) setMessages((prev) => [...prev, data]);
+          if (data.to === userId) setChatMessages((prev) => [...prev, data]);
           return;
         }
-        setMessages((prev) => [...prev, data]);
+        setChatMessages((prev) => [...prev, data]);
       });
 
       // My private channel
@@ -489,7 +679,7 @@ export const MessagingProvider = ({ children }) => {
             router.push(`/lobby/${data.gameId}`);
             break;
           case "friend":
-            await handleAcceptFriendship(data);
+            await handleAcceptedFriendship(data);
             router.push(`/peer/${data.senderId}`);
             break;
         }
@@ -511,7 +701,7 @@ export const MessagingProvider = ({ children }) => {
         senderId: userId,
         senderName: displayName,
       };
-      setMessagesService(new MessageService(metadata));
+      setMessageService(new MessageService(metadata));
     }
   }, [user, messageService]);
 
@@ -528,10 +718,10 @@ export const MessagingProvider = ({ children }) => {
         removeFriend,
         requestFriendship,
         requestFriendshipTo,
-        acceptAndStorePublicKey,
+        acceptFriendship,
         getEncryptionKey,
-        messages,
-        setMessages,
+        chatMessages,
+        setChatMessages,
         requests,
         setRequests,
         conversations,
@@ -539,13 +729,16 @@ export const MessagingProvider = ({ children }) => {
         unreadCounts,
         addConversation,
         deleteConversation,
-        markMessageAsPost,
-        markMessagesAsRead,
+        markConversationAsPost,
+        markConversationsAsRead,
         messageService,
         signals,
         addSignal,
         setSignals,
         peerIsTyping,
+        createOffer,
+        sendMessage,
+        sendFile,
       }}
     >
       <RequestNotifications />

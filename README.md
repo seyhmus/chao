@@ -118,6 +118,44 @@ The Secure Chat Application implements robust security measures to ensure the pr
 
 By implementing these security measures, the application ensures that messages and files can only be read by the intended recipients, providing a high level of privacy and security for user communications.
 
+## WebRTC Integration
+
+The Secure Chat Application leverages WebRTC (Web Real-Time Communication) technology to enable peer-to-peer communication between users. This integration enhances the application's performance and security by allowing direct communication between clients without the need for server intermediation for message exchange.
+
+Key aspects of the WebRTC integration:
+
+1. Purpose:
+
+   - Enables real-time, peer-to-peer data communication
+   - Reduces server load by offloading direct communication to clients
+   - Enhances privacy by establishing direct, encrypted connections between users
+
+2. Implementation:
+
+   - The application uses a custom `useWebRTC` hook (located in `hooks/useWebRTC.js`)
+   - This hook manages WebRTC peer connections and data channels for each peer
+   - It handles the creation of offers, processing of answers, and management of ICE candidates
+
+3. Signaling:
+
+   - While WebRTC enables peer-to-peer communication, initial connection setup requires a signaling mechanism
+   - The application uses Pusher for signaling, exchanging necessary information to establish WebRTC connections
+   - This includes exchanging offers, answers, and ICE candidates between peers
+
+4. Integration with Messaging:
+
+   - The WebRTC functionality is integrated with the existing messaging system
+   - When a WebRTC connection is established, messages are sent directly through the WebRTC data channel
+   - If WebRTC is not available or fails, the application falls back to using Pusher for message delivery
+
+5. Benefits:
+   - Lower latency for real-time communication
+   - Reduced server bandwidth usage for message exchange
+   - Enhanced privacy through direct, encrypted peer-to-peer connections
+   - Improved reliability with automatic fallback to server-based communication if peer-to-peer connection fails
+
+By integrating WebRTC, the Secure Chat Application provides a more efficient, secure, and responsive user experience for real-time communication between users.
+
 ## Repository Structure
 
 ```

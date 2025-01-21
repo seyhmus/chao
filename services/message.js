@@ -1,7 +1,7 @@
 "use client";
 
 import { compressImage } from "@/lib/imageUtil";
-import { slice } from "@/lib/fileUtil";
+import { compress, slice } from "@/lib/fileUtil";
 import { nanoid } from "nanoid";
 import api from "@/lib/api";
 
@@ -50,46 +50,6 @@ export class MessageService {
       console.error("Error uploading image:", error);
       throw error;
     }
-  }
-
-  async postFileToR2(file, compress = false) {
-    if (compress) {
-      if (file.type.startsWith("image/")) {
-        const { blob } = await compressImage(file);
-        const formData = new FormData();
-        formData.append("file", blob, file.name);
-        formData.append("userid", this.metadata.senderId);
-
-        const { url } = await uploadToR2(formData);
-        return { url, blob };
-      }
-
-      const stream = file.stream();
-      const compressedStream = stream.pipeThrough(
-        new CompressionStream("gzip")
-      );
-      const compressedBlob = await new Response(compressedStream).blob();
-      const newFile = new File([compressedBlob], file.name + ".gz", {
-        type: "application/gzip",
-      });
-
-      const { url } = await this.uploadFile(newFile);
-
-      return {
-        url,
-        blob: newFile,
-        compressedFileName: newFile.name,
-        compressedFileType: newFile.type,
-        isCompressed: compress,
-      };
-    }
-
-    const { url } = await this.uploadFile(file);
-
-    return {
-      url,
-      blob: file,
-    };
   }
 
   postFileToPusher = async (file) => {

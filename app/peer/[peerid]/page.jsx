@@ -4,11 +4,12 @@ import InProgressDialog from "@/components/InProgress";
 import MessageInput from "@/components/MessageInput";
 import MessageItem from "@/components/MessageItem";
 import useMessagingContext from "@/context/MessageContext";
+import { encrypt, encryptFile } from "@/lib/crypto";
+import { arrayBufferToBase64, compress, hashKey } from "@/lib/fileUtil";
+import { compressImage } from "@/lib/imageUtil";
 import { Flex, ScrollArea, Text } from "@radix-ui/themes";
 import { useParams } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
-import { encrypt, encryptFile } from "@/lib/crypto";
-import { hashKey } from "@/lib/fileUtil";
 
 const PrivateChat = () => {
   const { peerid } = useParams();
@@ -23,22 +24,30 @@ const PrivateChat = () => {
     getConversations,
     addConversation,
     deleteConversation,
-    markMessagesAsRead,
-    markMessageAsPost,
+    markConversationsAsRead,
+    markConversationAsPost,
     messageService,
     peerIsTyping,
+    createOffer,
+    sendMessage, // implemented in useWebRTC
   } = useMessagingContext();
 
   useEffect(() => {
     if (!peerid || !messageService) return;
-    markMessagesAsRead(peerid); // mark messages as read on page load
+    markConversationsAsRead(peerid); // mark messages as read on page load
+    createOffer(peerid); // initiate peer connection offer
   }, [peerid, messageService]);
 
   const send = async (data) => {
     let response;
-    if (data.isSignal) response = await messageService.postSignal(data);
-    else response = await messageService.postEvent(data);
-
+    try {
+      sendMessage(peerid, data);
+      console.log("sending", peerid, data);
+    } catch (error) {
+      console.info("Fallback to pusher for sending mesasge", error);
+      if (data.isSignal) response = await messageService.postSignal(data);
+      else response = await messageService.postEvent(data);
+    }
     return { ...data, ...response };
   };
 
@@ -77,10 +86,10 @@ const PrivateChat = () => {
     setIsTyping(false);
   };
 
-  // file upload - encrypted
+  // first compress, then encrypt file
   // todo: add status
   // todo: multipart upload
-  const handleSendEncryptedFile = async (event) => {
+  const handleSendFile = async (event) => {
     const file = event.target.files[0];
     if (!file) return;
 
@@ -95,32 +104,74 @@ const PrivateChat = () => {
       fileType: file.type,
       fileSize: file.size,
       hash,
+      blob: file,
     };
 
+    console.log("fileMetadata", fileMetadata);
+    const messageId = await addConversation(fileMetadata);
+    console.log("conversation is added with messageId", messageId);
+
     try {
-      const messageId = await addConversation({ ...fileMetadata, blob: file });
+      // compress first. if image, then use ImageUtil.compress to compress the image itself
+      // otherwise, compress the file using gzip
+      console.log("compressing file", file);
+      if (file.type.startsWith("image/")) {
+        fileMetadata.blob = await compressImage(file);
+      } else {
+        fileMetadata.blob = await compress(file);
+        fileMetadata.isCompressed = true;
+      }
 
+      // encrypt next
+      console.log("encrypting file", fileMetadata.blob);
       const encryptionKey = await getEncryptionKey(peerid);
+      const encrypted = await encryptFile(fileMetadata.blob, encryptionKey); // array buffer
+      fileMetadata.isEncrypted = true;
+      delete fileMetadata.blob; // remove blob from the message
 
-      const encryptedBlob = await encryptFile(file, encryptionKey);
-      const encryptedFile = new File([encryptedBlob], file.name, {
-        type: encryptedBlob.type,
-      });
+      // try sending using webrtc first
+      try {
+        const CHUNK_SIZE = 1024 * 64;
+        // const totalChunks = Math.ceil(base64String.length / CHUNK_SIZE);
+        const totalChunks = Math.ceil(encrypted.byteLength / CHUNK_SIZE);
 
-      const uploadResponse = await messageService.postFileToR2(
-        encryptedFile,
-        true // compress
-      );
+        for (let index = 0; index < totalChunks; index++) {
+          const start = index * CHUNK_SIZE;
+          const end = Math.min(start + CHUNK_SIZE, encrypted.byteLength);
+          const bchunk = encrypted.slice(start, end);
+          const chunk = arrayBufferToBase64(bchunk);
 
-      await messageService.postEvent({
-        ...fileMetadata,
-        ...uploadResponse,
-        eventType: "message",
-        method: "pusher",
-        isEncrypted: true,
-      });
+          await sendMessage(peerid, {
+            ...fileMetadata,
+            totalChunks,
+            chunk,
+            index,
+          });
+        }
+      } catch (error) {
+        // fallback to R2/Pusher
+        console.log("fallback to R2/Pusher", error);
+        fileMetadata.blob = new Blob([encrypted], {
+          type: "application/octet-stream",
+          name: file.name,
+        });
+        const uploadResponse = await messageService.uploadFile(
+          fileMetadata.blob
+        );
 
-      markMessageAsPost(messageId);
+        if (!uploadResponse.url) throw new Error("Error uploading file");
+
+        await messageService.postEvent({
+          ...fileMetadata,
+          ...uploadResponse,
+          eventType: "message",
+          method: "pusher",
+        });
+
+        console.log("file uploaded", fileMetadata, uploadResponse);
+      }
+
+      markConversationAsPost(messageId); // upload message with response?
     } catch (error) {
       deleteConversation(fileMetadata);
       console.error("Failed to upload encrypted file:", error);
@@ -162,7 +213,7 @@ const PrivateChat = () => {
       </ScrollArea>
 
       <MessageInput
-        handleSendFile={handleSendEncryptedFile}
+        handleSendFile={handleSendFile}
         handleSendMessage={handleSendMessage}
         handleGameRequest={messageService.postGameRequest}
         peerId={peerid}

@@ -79,7 +79,7 @@ const NavBar = () => {
             }}
             className="inline-flex items-center justify-center"
           >
-            <ChevronLeftIcon />
+            <ChevronLeftIcon width="32" height="32" />
           </IconButton>
         )}
         {photoURL && <Avatar src={photoURL} alt={title} />}

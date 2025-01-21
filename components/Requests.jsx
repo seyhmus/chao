@@ -4,7 +4,7 @@ import useMessagingContext from "@/context/MessageContext";
 export default function RequestNotifications({}) {
   const router = useRouter();
 
-  const { requests, setRequests, messageService, acceptAndStorePublicKey } =
+  const { requests, setRequests, messageService, acceptFriendship } =
     useMessagingContext();
 
   const handleAccept = async (request) => {
@@ -17,7 +17,7 @@ export default function RequestNotifications({}) {
           router.push(`/lobby/${gameId}`);
           break;
         case "friend":
-          await acceptAndStorePublicKey(request);
+          await acceptFriendship(request);
           router.push(`/peer/${request.senderId}`);
           break;
         default:

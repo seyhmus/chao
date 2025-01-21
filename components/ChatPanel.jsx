@@ -27,11 +27,11 @@ const ChatPanel = ({
   sendFriendRequest,
   sendGameRequest,
 }) => {
-  const { userId, users, messages, setMessages, isFriend } =
+  const { userId, users, chatMessages, setChatMessages, isFriend } =
     useMessagingContext();
 
   const addPreview = (previewId, previewUrl) => {
-    setMessages((prev) => [
+    setChatMessages((prev) => [
       ...prev,
       {
         previewId,
@@ -43,12 +43,14 @@ const ChatPanel = ({
   };
 
   const clearPreview = (previewId, previewUrl) => {
-    setMessages((prev) => prev.filter((msg) => msg.previewId !== previewId));
+    setChatMessages((prev) =>
+      prev.filter((msg) => msg.previewId !== previewId)
+    );
     URL.revokeObjectURL(previewUrl);
   };
 
   const groupedMessages = useMemo(() => {
-    return messages.reduce((acc, data) => {
+    return chatMessages.reduce((acc, data) => {
       if (acc.length > 0 && acc[acc.length - 1].senderId === data.senderId) {
         acc[acc.length - 1].messages.push(data);
       } else {
@@ -56,12 +58,12 @@ const ChatPanel = ({
       }
       return acc;
     }, []);
-  }, [messages]);
+  }, [chatMessages]);
 
   const messagesEndRef = useRef(null);
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
+  }, [chatMessages]);
 
   return (
     <Flex direction="column" className="h-full fixed inset-0 pt-16">
@@ -158,7 +160,7 @@ const ChatPanel = ({
         <div ref={messagesEndRef} />
       </ScrollArea>
 
-      <DebugCard content={{ users, messages, groupedMessages }} />
+      <DebugCard content={{ users, groupedMessages }} />
 
       {/* Message input */}
       <Box
